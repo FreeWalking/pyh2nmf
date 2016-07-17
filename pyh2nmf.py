@@ -3,6 +3,8 @@ from scipy.sparse.linalg import svds as svds
 from sklearn.cluster import KMeans as KMeans
 from scipy.sparse import spdiags as spdiags
 from numpy.linalg import norm as norm
+from numpy.matlib import repmat as repmat
+from scipy.io import loadmat as loadmat
 """ Simple Python Port of H2nmf"""
 """ B Ravi Kiran, ENS Paris """
 
@@ -45,7 +47,7 @@ def hierclust2nmf(M,r,algo,sol):
     assert((min(M.ravel()) >= 0).all())
     
     if(algo==None):
-        algo = 'h2nmf'
+        algo = 1
     # The input is a tensor --> matrix format
     if len(M.shape) == 3:
         rows,cols,bands = M.shape 
@@ -53,6 +55,8 @@ def hierclust2nmf(M,r,algo,sol):
         A = np.zeros(shape=(bands,n))
         for i in range(bands):
             A[i,:] = M[:,:,i].ravel()
+        M = A.copy()
+        A = None
         
     
 
@@ -67,11 +71,11 @@ def hierclust2nmf(M,r,algo,sol):
         sol['childs'] = {} # Child(i,:) = child of node i
         sol['leafnodes'] = [] # Current clustering: set of leaf nodes corresponding to selected clusters
         sol['leafnodes'].append(1)        
-        sol['e'] = -1 # Criterion to decide which leafnode to split 
+        sol['e'] = {}        
+        sol['e'][1] = -1 # Criterion to decide which leafnode to split 
         sol['U'] = {}
         sol['U'][1] = np.ones(shape=(bands,1)) # Centroids
-        sol['Ke'] = []
-        sol['Ke'].append(1) # index centroid: index of the endmember
+        sol['Ke'] = 1 # index centroid: index of the endmember
         sol['count'] = 1 # Number of clusters generated so far
         sol['firstsv'] = 0 
     
@@ -84,6 +88,7 @@ def hierclust2nmf(M,r,algo,sol):
         # Update: split leaf nodes added at previous iteration
         #***************************************************************
         for k in range(len(sol['leafnodes'])):
+            print('HERE : '+repr(k))
             # Update leaf nodes not yet split
             if sol['e'][sol['leafnodes'][k]] == -1 and len(sol['K'][sol['leafnodes'][k]]) > 1:
                 # Update leaf node ind(k) by splitting it and adding its child nodes
@@ -123,7 +128,7 @@ def hierclust2nmf(M,r,algo,sol):
         if sol['count'] == 1: # Only one leaf node, the root node: split it.  
             b = 1 
         elif manualsplit == 0: # Split the node maximizing the critetion e
-                [a,b] = max(sol['e'](sol['leafnodes'])) 
+                b = np.argmax(sol['e'](sol['leafnodes'])) 
             
             
         sol['leafnodes'] = np.concatenate(sol['leafnodes'], sol['childs'][sol['leafnodes'][b],:]) # Add its two children
@@ -170,7 +175,7 @@ def splitclust(M,algo=1):
     if algo == 1:  # rank-2 NMF
         U,V,s = rank2nmf(M)
         # Normalize columns of V to sum to one
-        V = np.multiply(V,np.repmat( (sum(V)+1e-16)**(-1), 2,1)) 
+        V = np.multiply(V,repmat( (sum(V)+1e-16)**(-1), 2,1)) 
         x = V[0,:].T 
         # Compute treshold to split cluster 
         threshold = fquad(x) 
@@ -274,9 +279,10 @@ def rank2nmf(M):
         V = np.abs(V) 
         s1 = S 
     else:
-        [u,s,v] = fastsvds(M,2) 
-        s1 = s(1) 
-        K = FastSepNMF(s*v.T,2) 
+        u,s,v = fastsvds(M,2) 
+        s1 = s[0]
+        print(v.shape, s.shape, np.dot(s,v.T).shape)
+        K = FastSepNMF(np.dot(s,v.T),2) 
         U = np.zeros(shape=(M.shape[0],2)) 
         if length(K) >= 1:
             U[:,0] = max(u*s*v[K[0],:].T,0) 
@@ -289,7 +295,38 @@ def rank2nmf(M):
     return (U,V,s1)
     
 
-def FastSepNMF(M,r,normalize):
+def fastsvds(M,r): 
+    """
+    "Fast" but less accurate SVD by computing the SVD of MM^T or M^TM 
+    ***IF*** one of the dimensions of M is much smaller than the other. 
+    Note. This is numerically less stable, but useful for large hyperspectral 
+    images. 
+
+    """
+
+    m,n = M.shape 
+    rationmn = 10 # Parameter, should be >= 1
+
+    if m < rationmn*n: 
+        MMt = np.dot(M,M.T)
+        u,s,v = svds(MMt,r)
+        s = np.diag(s)
+        v = np.dot(M.T, u) 
+        v = np.multiply(v,repmat( (sum(v**2)+1e-16)**(-0.5),n,1)) 
+        s = np.sqrt(s) 
+    elif n < rationmn*m:
+        MtM = np.dot(M.T,M)
+        u,s,v = svds(MtM,r) 
+        s = np.diag(s)
+        u = np.dot(M,v) 
+        u = np.multiply(u,repmat( (sum(u**2)+1e-16)**(-0.5),m,1))
+        s = np.sqrt(s) 
+    else:
+        u,s,v = svds(M,r) 
+        s = np.diag(s)
+    return (u,s,v)
+    
+def FastSepNMF(M,r,normalize=0):
 
     """
      FastSepNMF - Fast and robust recursive algorithm for separable NMF
@@ -332,14 +369,12 @@ def FastSepNMF(M,r,normalize):
      ||(I-uu^T)v||^2 = ||v||^2 - (u^T v)^2. 
     """
     m,n = M.shape
-    J = []
+    J = {}
 
-    if nargin <= 2: 
-        normalize = 0
     if normalize == 1:
         # Normalization of the columns of M so that they sum to one
         D = spdiags((sum(M)**(-1)).T, 0, n, n) 
-        M = M*D 
+        M = np.dot(M,D) 
     
 
     normM = sum(M**2) 
@@ -350,14 +385,15 @@ def FastSepNMF(M,r,normalize):
     # smaller than 10^-9)
     while i <= r and max(normM)/nM > 1e-9:
         # Select the column of M with largest l2-norm
-        [a,b] = max(normM) 
+        a = max(normM)        
+        b = np.argmax(normM) 
         # Norm of the columns of the input matrix M 
         if i == 1: 
             normM1 = normM 
         # Check ties up to 1e-6 precision
         b = np.where((a-normM)/a <= 1e-6) 
         # In case of a tie, select column with largest norm of the input matrix M 
-        if length(b) > 1: 
+        if len(b) > 1: 
             d = np.argmax(normM1(b)) 
             b = b(d) 
         # Update the index set, and extracted column
@@ -432,9 +468,10 @@ def fdelta(x,s=0.01):
         finter[i] = ( sum(x <= deltahigh) - sum(x < deltalow) )/n/(deltahigh-deltalow) 
     return (fdel,fdelp,delta,finter,gs)
     
-M = np.random.rand(100,100,400)
-r = 10
-algo  =1
+matlab_mat = loadmat('Urban.mat')
+M = matlab_mat['R'][:,:,0::10]
+r = 5
+algo = 1
 sol = None
 
 IDX, C, J, sol = hierclust2nmf(M,r,algo, sol)
