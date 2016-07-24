@@ -5,8 +5,9 @@ from scipy.sparse import spdiags as spdiags
 from numpy.linalg import norm as norm
 from numpy.matlib import repmat as repmat
 from scipy.io import loadmat as loadmat
-""" Simple Python Port of H2nmf"""
-""" B Ravi Kiran, ENS Paris """
+from numpy.matlib import repmat
+""" Simple Python Port of H2nmf by Gillis et al. 2014"""
+""" B Ravi Kiran, ENS Paris June 2016 """
 
 def hierclust2nmf(M,r,algo,sol):
     """
@@ -42,22 +43,18 @@ def hierclust2nmf(M,r,algo,sol):
       sol  : contains the tree structure
     """
     
-    # The input matrix contains negative entries which have been set to zero
-    print(M.ravel().shape)
+    # The input matrix contains negative entries which have been set to zero    
     assert((min(M.ravel()) >= 0).all())
     
     if(algo==None):
         algo = 1
+    
     # The input is a tensor --> matrix format
     if len(M.shape) == 3:
         rows,cols,bands = M.shape 
         n = rows*cols
-        A = np.zeros(shape=(bands,n))
-        for i in range(bands):
-            A[i,:] = M[:,:,i].ravel()
-        M = A.copy()
-        A = None
-        
+        #fortran ordering reshape
+        M = M.reshape((rows*cols,bands), order ='F').transpose()
     
 
     if sol == None: 
@@ -87,8 +84,7 @@ def hierclust2nmf(M,r,algo,sol):
         #***************************************************************
         # Update: split leaf nodes added at previous iteration
         #***************************************************************
-        for k in range(len(sol['leafnodes'])):
-            print('HERE : '+repr(k))
+        for k in range(len(sol['leafnodes'])):            
             # Update leaf nodes not yet split
             if sol['e'][sol['leafnodes'][k]] == -1 and len(sol['K'][sol['leafnodes'][k]]) > 1:
                 # Update leaf node ind(k) by splitting it and adding its child nodes
@@ -281,17 +277,20 @@ def rank2nmf(M):
     else:
         u,s,v = fastsvds(M,2) 
         s1 = s[0]
-        print(v.shape, s.shape, np.dot(s,v.T).shape)
-        K = FastSepNMF(np.dot(s,v.T),2) 
+#        print(v.shape, s.shape, np.dot(s,v.T).shape)
+        K,_,_ = FastSepNMF(np.dot(s,v.T),2) 
+        
         U = np.zeros(shape=(M.shape[0],2)) 
-        if length(K) >= 1:
-            U[:,0] = max(u*s*v[K[0],:].T,0) 
+        if len(K) >= 1:
+            us = np.dot(u,s)
+            U[:,0] = np.maximum(np.dot(us,v[K[0],:]),0) 
         
         if len(K) >= 2:
-            U[:,2] = max(u*s*v[K[2],:].T,0) 
+            us = np.dot(u,s)
+            U[:,1] = np.maximum(np.dot(us,v[K[1],:]),0) 
         
         # Compute corresponding optimal V 
-        V = anls_entry_rank2_precompute_opt(U'*U, M'*U) 
+        V = anls_entry_rank2_precompute_opt(np.dot(U.T,U), np.dot(M.T,U)) 
     return (U,V,s1)
     
 
@@ -369,36 +368,39 @@ def FastSepNMF(M,r,normalize=0):
      ||(I-uu^T)v||^2 = ||v||^2 - (u^T v)^2. 
     """
     m,n = M.shape
-    J = {}
-
+    J = []
+    U = np.zeros((m,r)) #this is the maximal size
     if normalize == 1:
         # Normalization of the columns of M so that they sum to one
         D = spdiags((sum(M)**(-1)).T, 0, n, n) 
         M = np.dot(M,D) 
     
 
-    normM = sum(M**2) 
-    nM = max(normM) 
-
-    i = 1 
+    normM = np.sum(M**2,axis=0) 
+    nM = np.max(normM) 
+    #python indexing
+    i = 0 
     # Perform r recursion steps (unless the relative approximation error is 
     # smaller than 10^-9)
-    while i <= r and max(normM)/nM > 1e-9:
+    while i < r and np.max(normM)/nM > 1e-9:
         # Select the column of M with largest l2-norm
-        a = max(normM)        
-        b = np.argmax(normM) 
+        a = np.amax(normM)        
+        #b = np.argmax(normM) 
         # Norm of the columns of the input matrix M 
         if i == 1: 
             normM1 = normM 
         # Check ties up to 1e-6 precision
         b = np.where((a-normM)/a <= 1e-6) 
         # In case of a tie, select column with largest norm of the input matrix M 
+#        print(b)
         if len(b) > 1: 
-            d = np.argmax(normM1(b)) 
-            b = b(d) 
+            d = np.argmax(normM1[b]) 
+            b = b[d] 
+        
+        assert(len(b)==1)
         # Update the index set, and extracted column
-        J[i] = b 
-        U[:,i] = M[:,b] 
+        J.append(b)
+        U[:,i] = M[:,b].ravel()
         
         # Compute (I-u_{i-1}u_{i-1}^T)...(I-u_1u_1^T) U(:,i), that is, 
         # R^(i)(:,J(i)), where R^(i) is the ith residual (with R^(1) = M).
@@ -416,10 +418,10 @@ def FastSepNMF(M,r,normalize=0):
         
         # Update the norm of the columns of M after orhogonal projection using
         # the formula ||r^(i)_k||^2 = ||r^(i-1)_k||^2 - ( v^T m_k )^2 for all k. 
-        normM = normM - (v.T*M)**2 
+        normM = normM - (np.dot(v.T,M))**2 
         
         i = i + 1 
-        return (J,normM,U)
+    return (np.squeeze(J), normM, U)
         
 def fquad(x,s=0.01): 
     """
@@ -449,29 +451,84 @@ def fdelta(x,s=0.01):
     for all delta in interval [0,1] with step s
     """
     n = len(x) 
-    delta = range(0,1,s) 
+    delta = np.arange(0,1,s) 
     lD = len(delta) 
 
     gs = 0.05 # Other values could be used, in [0,0.5]
-
+    fdel = {}
+    finter = {}
+    fdelp = []
     for i in range(lD):
-        fdel[i] = sum(x <= delta(i))/n
-        if i == 2: # use only next point to evaluate fdelp(1)
-            fdelp[1] = (fdel[2]-fdel[1])/s 
-        elif i >= 2: # use next and previous point to evaluate fdelp(i)
+        fdel[i] = sum(x <= delta[i])/n
+        if i == 1: # use only next point to evaluate fdelp(1)
+            fdelp[1] = (fdel[1]-fdel[0])/s 
+        elif i >= 1: # use next and previous point to evaluate fdelp(i)
             fdelp[i-1] = (fdel[i]-fdel[i-2])/2/s 
             if i == lD: # use only previous point to evaluate fdelp(lD)
                 fdelp[lD] = (fdel[lD]-fdel[lD-1])/s 
         
-        deltahigh = min(1,delta(i) + gs)
-        deltalow = max(0,delta(i) - gs) 
+        deltahigh = np.minimum(1,delta[i] + gs)
+        deltalow = np.maximum(0,delta[i] - gs) 
         finter[i] = ( sum(x <= deltahigh) - sum(x < deltalow) )/n/(deltahigh-deltalow) 
     return (fdel,fdelp,delta,finter,gs)
     
+def anls_entry_rank2_precompute_opt(left, right):
+    """
+    Solve min_H ||M - WH'||_2 s.t. H >= 0
+
+    where left = W^TW and right = M^TW 
+
+    See Kuang, Park, `Fast Rank-2 Nonnegative Matrix Factorization 
+    for Hierarchical Document Clustering', KDD '13. 
+
+    See also Algorithm 4 in 
+    Gillis, Kuang, Park, `Hierarchical Clustering of Hyperspectral Images 
+    using Rank-Two Nonnegative Matrix Factorization', arXiv. 
+
+    ****** Input ******
+    left     : 2-by-2 matrix (or possibly 1-by-1)
+    right    : n-by-2 matrix (or possibly n-by-1)
+
+    ****** Output ******
+    H    : nonnegative n-by-2 matrix, solution to KKT equations
+    """
+
+    if len(left) == 1:
+        H = max(0,right/left)
+    else:
+        H = np.linalg.solve(left, right.T).T 
+        #need to find a dimension wise .all() flag (this does not work for now)
+        #original ~all(H>=0, 2)
+        use_either = np.all(H>=0,axis=1)
+        H[use_either, :] = anls_entry_rank2_binary(left, right[use_either,:]) 
+        H = H.T 
+
+    return H
+
+
+def anls_entry_rank2_binary(left, right):
+    """ Case where one entry in each column of H has to be equal to zero """
+    n = right.shape[0]
+
+    solve_either = np.zeros(shape=(n, 2))
+    solve_either[:, 0] = np.maximum(0, np.divide(right[:, 0], left[0,0])) 
+    solve_either[:, 1] = np.maximum(0, np.divide(right[:, 1], left[1,1])) 
+
+    cosine_either = np.multiply(solve_either, repmat([np.sqrt(left[0,0]), np.sqrt(left[1,1])],n,1) )
+
+    choose_first = (cosine_either[:, 0] >= cosine_either[:, 1])
+    solve_either[choose_first, 1] = 0
+    solve_either[~choose_first, 0] = 0
+    return solve_either
+    
 matlab_mat = loadmat('Urban.mat')
-M = matlab_mat['R'][:,:,0::10]
+#pick every 10th slice (faster for test)
+M = matlab_mat['R'][:,:,:].astype(float)
+#r-clusters
 r = 5
+#1 h2nmf, 2 hkm, 3 hskm
 algo = 1
+#no initial tree structure
 sol = None
 
 IDX, C, J, sol = hierclust2nmf(M,r,algo, sol)
