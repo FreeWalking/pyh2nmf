@@ -45,6 +45,7 @@ def hierclust2nmf(M,r,algo,sol):
     
     # The input matrix contains negative entries which have been set to zero    
     assert((min(M.ravel()) >= 0).all())
+    manualsplit = 0
     
     if(algo==None):
         algo = 1
@@ -62,9 +63,11 @@ def hierclust2nmf(M,r,algo,sol):
         sol = {}        
         sol['K'] = {}
         sol['K'][1] = range(n) # All clusters the first node contains all pixels
-        sol['allnodes'] = 1 # nodes numbering
+        sol['allnodes'] = []        
+        sol['allnodes'].append(1) # nodes numbering
         sol['maxnode'] = 1 # Last leaf node added
-        sol['parents'] = (0, 0) # Parents of leaf nodes
+        sol['parents'] = {}
+        sol['parents'][1] = (0, 0) # Parents of leaf nodes
         sol['childs'] = {} # Child(i,:) = child of node i
         sol['leafnodes'] = [] # Current clustering: set of leaf nodes corresponding to selected clusters
         sol['leafnodes'].append(1)        
@@ -94,15 +97,15 @@ def hierclust2nmf(M,r,algo,sol):
                     # Add the two leaf nodes, child of nodes(sol['leafnodes'](k))
                     sol['allnodes'] = sol['allnodes'].append((sol['maxnode']+1,sol['maxnode']+2)) 
 
-                    sol['parents'][sol['maxnode']+1,:] = (sol['leafnodes'][k], 0) 
-                    sol['parents'][sol['maxnode']+2,:] = (sol['leafnodes'](k), 0)
+                    sol['parents'][sol['maxnode']+1] = (sol['leafnodes'][k], 0) 
+                    sol['parents'][sol['maxnode']+2] = (sol['leafnodes'][k], 0)
 
-                    sol['childs'][sol['leafnodes'][k], : ] = (sol['maxnode']+1, sol['maxnode']+2) 
-                    sol['childs'][sol['maxnode']+1 , :] = 0 
-                    sol['childs'][sol['maxnode']+2 , :] = 0 
+                    sol['childs'][sol['leafnodes'][k]] = (sol['maxnode']+1, sol['maxnode']+2) 
+                    sol['childs'][sol['maxnode']+1] = 0 
+                    sol['childs'][sol['maxnode']+2] = 0 
 
-                    sol['K'][sol['maxnode']+1] = sol['K'][sol['leafnodes'][k][Kc[1]]]  
-                    sol['K'][sol['maxnode']+2] = sol['K'][sol['leafnodes'][k][Kc[2]]]
+                    sol['K'][sol['maxnode']+1] = sol['K'][sol['leafnodes'][k]][Kc[1]]  
+                    sol['K'][sol['maxnode']+2] = sol['K'][sol['leafnodes'][k]][Kc[2]]
 
                     sol['U'][:,sol['maxnode']+1],sol['firstsv'][sol['maxnode']+1], sol['Ke'][sol['maxnode']+1] = reprvec(M[:,sol['K'][sol['maxnode']+1]]) 
                     sol['U'][:,sol['maxnode']+2],sol['firstsv'][sol['maxnode']+2], sol['Ke'][sol['maxnode']+2] = reprvec(M[:,sol['K'][sol['maxnode']+2]]) 
@@ -131,10 +134,10 @@ def hierclust2nmf(M,r,algo,sol):
         sol['leafnodes'] = np.concatenate(sol['leafnodes'][1:b-1], sol['leafnodes'][b+1:-1]) # Remove bth leaf node
 
         if manualsplit == 0: # Dispay progress in tree exploration
-            if mod(sol['count'],10) == 0:
+            if np.rem(sol['count'],10) == 0:
                 print(repr(sol['count'])) 
             if sol['count'] == r-1:
-                fprintf('Done. \n',sol['count']) 
+                print('Done. \n' + repr(sol['count'])) 
         
 
         sol['count'] = sol['count']+1 
@@ -174,7 +177,7 @@ def splitclust(M,algo=1):
         V = np.multiply(V,repmat( (sum(V)+1e-16)**(-1), 2,1)) 
         x = V[0,:].T 
         # Compute treshold to split cluster 
-        threshold = fquad(x) 
+        threshold,_,_ = fquad(x) 
         K = {} #children dictionary
         K[1] = np.where(x >= threshold) 
         K[2] = np.where(x < threshold) 
@@ -435,14 +438,14 @@ def fquad(x,s=0.01):
     # fdel is the percentage of values smaller than delta
     # finter is the number of points in a small interval around delta
 
-    fobj = -log( np.multiply(fdel, (1-fdel) ) + exp(finter)) 
+    fobj = -np.log( np.multiply(fdel, (1-fdel) ) + np.exp(finter)) 
     # Can potentially use other objectives: 
     #fobj = -log( fdel.* (1-fdel) ) + 2.^(finter) 
     #fobj = ( 2*(fdel - 0.5) ).^2 + finter.^2 
     #fobj = -log( fdel.* (1-fdel) ) + finter.^2 
     #fobj = ( 2*(fdel - 0.5) ).^2 + finter.^2 
     b = np.argmin(fobj) 
-    thres = delta(b) 
+    thres = delta[b] 
     return (thres,delta,fobj)
 
 def fdelta(x,s=0.01): 
@@ -455,13 +458,13 @@ def fdelta(x,s=0.01):
     lD = len(delta) 
 
     gs = 0.05 # Other values could be used, in [0,0.5]
-    fdel = {}
-    finter = {}
-    fdelp = []
+    fdel = np.zeros((lD))
+    finter = np.zeros((lD))
+    fdelp = np.zeros((lD))
     for i in range(lD):
         fdel[i] = sum(x <= delta[i])/n
         if i == 1: # use only next point to evaluate fdelp(1)
-            fdelp[1] = (fdel[1]-fdel[0])/s 
+            fdelp[0] = (fdel[1]-fdel[0])/s 
         elif i >= 1: # use next and previous point to evaluate fdelp(i)
             fdelp[i-1] = (fdel[i]-fdel[i-2])/2/s 
             if i == lD: # use only previous point to evaluate fdelp(lD)
@@ -522,8 +525,8 @@ def anls_entry_rank2_binary(left, right):
     return solve_either
     
 matlab_mat = loadmat('Urban.mat')
-#pick every 10th slice (faster for test)
-M = matlab_mat['R'][:,:,:].astype(float)
+#pick every 10x10 patch (faster for test)
+M = matlab_mat['R'][:10,:10,:].astype(float)
 #r-clusters
 r = 5
 #1 h2nmf, 2 hkm, 3 hskm
