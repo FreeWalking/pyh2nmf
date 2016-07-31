@@ -6,6 +6,8 @@ from numpy.linalg import norm as norm
 from numpy.matlib import repmat as repmat
 from scipy.io import loadmat as loadmat
 from numpy.matlib import repmat
+from scipy import sparse
+
 """ Simple Python Port of H2nmf by Gillis et al. 2014"""
 """ B Ravi Kiran, ENS Paris June 2016 """
 
@@ -62,7 +64,7 @@ def hierclust2nmf(M,r,algo,sol):
         # Intialization of the tree structure        
         sol = {}        
         sol['K'] = {}
-        sol['K'][1] = range(n) # All clusters the first node contains all pixels
+        sol['K'][1] = np.array(range(n),dtype=int) # All clusters the first node contains all pixels
         sol['allnodes'] = []        
         sol['allnodes'].append(1) # nodes numbering
         sol['maxnode'] = 1 # Last leaf node added
@@ -74,10 +76,12 @@ def hierclust2nmf(M,r,algo,sol):
         sol['e'] = {}        
         sol['e'][1] = -1 # Criterion to decide which leafnode to split 
         sol['U'] = {}
-        sol['U'][1] = np.ones(shape=(bands,1)) # Centroids
-        sol['Ke'] = 1 # index centroid: index of the endmember
+        sol['U'][1] = np.ones(shape=(bands)) # Centroids
+        sol['Ke'] = {}
+        sol['Ke'][sol['maxnode']] = 1 # index centroid: index of the endmember
         sol['count'] = 1 # Number of clusters generated so far
-        sol['firstsv'] = 0 
+        sol['firstsv'] = {}
+        sol['firstsv'][sol['maxnode']] = 0
     
 
     print('Hierarchical clustering started...')  
@@ -107,15 +111,15 @@ def hierclust2nmf(M,r,algo,sol):
                     sol['K'][sol['maxnode']+1] = sol['K'][sol['leafnodes'][k]][Kc[1]]  
                     sol['K'][sol['maxnode']+2] = sol['K'][sol['leafnodes'][k]][Kc[2]]
 
-                    sol['U'][:,sol['maxnode']+1],sol['firstsv'][sol['maxnode']+1], sol['Ke'][sol['maxnode']+1] = reprvec(M[:,sol['K'][sol['maxnode']+1]]) 
-                    sol['U'][:,sol['maxnode']+2],sol['firstsv'][sol['maxnode']+2], sol['Ke'][sol['maxnode']+2] = reprvec(M[:,sol['K'][sol['maxnode']+2]]) 
+                    sol['U'][sol['maxnode']+1], sol['firstsv'][sol['maxnode']+1], sol['Ke'][sol['maxnode']+1] = reprvec(M[:,sol['K'][sol['maxnode']+1]]) 
+                    sol['U'][sol['maxnode']+2], sol['firstsv'][sol['maxnode']+2], sol['Ke'][sol['maxnode']+2] = reprvec(M[:,sol['K'][sol['maxnode']+2]]) 
 
                     # Update criterion to choose next cluster to split
                     sol['e'][sol['maxnode']+1] = -1 
                     sol['e'][sol['maxnode']+2] = -1
 
                     # Compte the reduction in the error if kth cluster is split 
-                    sol['e'][sol['leafnodes'][k]] = np.sqaure(sol['firstsv'][sol['maxnode']+1]) + np.sqaure(sol['firstsv'][sol['maxnode']+2]) - np.sqaure(sol['firstsv'][sol['leafnodes'][k]]) 
+                    sol['e'][sol['leafnodes'][k]] = (sol['firstsv'][sol['maxnode']+1])**2 + (sol['firstsv'][sol['maxnode']+2])**2 - (sol['firstsv'][sol['leafnodes'][k]])**2 
 
                     sol['maxnode'] = sol['maxnode']+2 
            
@@ -125,20 +129,13 @@ def hierclust2nmf(M,r,algo,sol):
         # Choose the cluster to split, split it, and update leaf nodes
         #***************************************************************
         if sol['count'] == 1: # Only one leaf node, the root node: split it.  
-            b = 1 
+            b = 0 
         elif manualsplit == 0: # Split the node maximizing the critetion e
-                b = np.argmax(sol['e'](sol['leafnodes'])) 
+            b = np.argmax(sol['e'](sol['leafnodes'])) 
             
-            
-        sol['leafnodes'] = np.concatenate(sol['leafnodes'], sol['childs'][sol['leafnodes'][b],:]) # Add its two children
-        sol['leafnodes'] = np.concatenate(sol['leafnodes'][1:b-1], sol['leafnodes'][b+1:-1]) # Remove bth leaf node
-
-        if manualsplit == 0: # Dispay progress in tree exploration
-            if np.rem(sol['count'],10) == 0:
-                print(repr(sol['count'])) 
-            if sol['count'] == r-1:
-                print('Done. \n' + repr(sol['count'])) 
-        
+        #update leaves
+        sol['leafnodes'].append(sol['childs'][sol['leafnodes'][b]]) # Add its two children
+        sol['leafnodes'] = np.concatenate(sol['leafnodes'][0:b-1], sol['leafnodes'][b+1:-1]) # Remove bth leaf node
 
         sol['count'] = sol['count']+1 
     
@@ -246,7 +243,7 @@ def reprvec(M):
 	#Exctract the column of M approximating u the best (up to a translation and scaling)
 	u = u - np.mean(u) 
 	Mm = M - np.mean(M)  
-	err = np.acos( np.divide(Mm.T*u/np.norm(u)),( np.sqrt(sum(Mm**2)) ).T ) 
+	err = np.arccos( np.divide(np.dot(Mm.T,u/norm(u)),(np.sqrt(np.sum(Mm**2))).T) ) 
 	b = np.argmin(err) 
 	u = M[:,b] 
 	return u,s,b
@@ -523,10 +520,61 @@ def anls_entry_rank2_binary(left, right):
     solve_either[choose_first, 1] = 0
     solve_either[~choose_first, 0] = 0
     return solve_either
+
+def spkmeans(X, init):
+        
+    """
+    Perform spherical k-means clustering.
+    X: d x n data matrix
+    init: k (1 x 1) or label (1 x n, 1<=label(i)<=k) or center (d x k)
+    Reference: Clustering on the Unit Hypersphere using Von Mises-Fisher Distributions.
+    by A. Banerjee, I. Dhillon, J. Ghosh and S. Sra.
+    Written by Michael Chen (sth4nth@gmail.com).
+    Based on matlab version @ 
+    http://www.mathworks.com/matlabcentral/fileexchange/28902-spherical-k-means/content/spkmeans.m 
+    (and slightly modifed to run on previous verions of Matlab)
+    initialization
+    """
+    d,n = X.shape
+
+    if n <= init:
+        label = range(1,init) 
+        m = X 
+        energy = 0
+    else:
+        # Normalize the columns of X
+        X = np.dot(X, repmat( (sum(X**2)+1e-16)**(-0.5),d,1)) 
+
+        if len(init) == 1:
+            idx = randsample(n,init)
+            m = X[:,idx]
+            [ul,label] = np.maximum(np.dot(m.T,X),[],1)
+        elif init.shape[0] == 1 and init.shape[1] == n:
+            label = init
+        elif init.shape[0] == d:
+            m = np.multiply(init, repmat( (sum(init**2)+1e-16)**(-0.5),d,1))
+            ul,label = np.maximum(np.dot(m.T,X),[],1)
+        else:
+            error('ERROR: init is not valid.')
+		
+		## main algorithm: final version 
+        last = 0
+        while (label != last).any():
+            u,pipi,label = np.unique(label)   # remove empty clusters
+            k = len(u)
+            E = sparse.coo_matrix(range(n),label,1,n,k,n)
+            m = np.dot(X,E) 
+            m = np.dot(m, repmat( (sum(m**2)+1e-16)**(-0.5),d,1)) 
+            last = label
+            val = np.maximum(np.dot(m.T*X),[],1)
+            label = np.argmax(np.dot(m.T*X),[],1)
+        ul,ul,label = np.unique(label)   # remove empty clusters
+        energy = np.sum(val)
+    return (label, m, energy)
     
 matlab_mat = loadmat('Urban.mat')
-#pick every 10x10 patch (faster for test)
-M = matlab_mat['R'][:10,:10,:].astype(float)
+#pick every 10x10 patch with 20 lambdas (faster for test)
+M = matlab_mat['R'][:10,:10,:20].astype(float)
 #r-clusters
 r = 5
 #1 h2nmf, 2 hkm, 3 hskm
